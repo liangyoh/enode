@@ -1,7 +1,9 @@
-﻿namespace ENode.Commanding
+﻿using System.Threading.Tasks;
+
+namespace ENode.Commanding
 {
     public interface IProcessingCommandHandler
     {
-        void Handle(ProcessingCommand processingCommand);
+       Task HandleAsync(ProcessingCommand processingCommand);
     }
 }

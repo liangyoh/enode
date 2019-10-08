@@ -2,7 +2,7 @@
 using System.Threading.Tasks;
 using BankTransferSample.Domain;
 using ECommon.IO;
-using ENode.Infrastructure;
+using ENode.Messaging;
 
 namespace BankTransferSample.EventHandlers
 {
@@ -15,6 +15,11 @@ namespace BankTransferSample.EventHandlers
         public void SetExpectedCount(int expectedCount)
         {
             _expectedCount = expectedCount;
+        }
+        public void Reset()
+        {
+            _currentCount = 0;
+            _waitHandle.Reset();
         }
 
         public void WaitOne()

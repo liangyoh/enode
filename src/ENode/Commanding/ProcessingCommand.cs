@@ -1,10 +1,11 @@
 ﻿using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace ENode.Commanding
 {
     public class ProcessingCommand
     {
-        public ProcessingCommandMailbox Mailbox { get; set; }
+        public ProcessingCommandMailbox MailBox { get; set; }
         public long Sequence { get; set; }
         public ICommand Message { get; private set; }
         public ICommandExecuteContext CommandExecuteContext { get; private set; }
@@ -17,9 +18,9 @@ namespace ENode.Commanding
             Items = items ?? new Dictionary<string, string>();
         }
 
-        public void Complete(CommandResult commandResult)
+        public Task CompleteAsync(CommandResult commandResult)
         {
-            CommandExecuteContext.OnCommandExecuted(commandResult);
+            return CommandExecuteContext.OnCommandExecutedAsync(commandResult);
         }
     }
 }

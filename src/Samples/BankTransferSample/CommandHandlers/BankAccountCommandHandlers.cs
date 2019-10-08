@@ -5,6 +5,7 @@ using BankTransferSample.Domain;
 using ECommon.IO;
 using ENode.Commanding;
 using ENode.Infrastructure;
+using ENode.Messaging;
 
 namespace BankTransferSample.CommandHandlers
 {
@@ -12,7 +13,7 @@ namespace BankTransferSample.CommandHandlers
     /// </summary>
     public class BankAccountCommandHandlers :
         ICommandHandler<CreateAccountCommand>,                       //开户
-        ICommandAsyncHandler<ValidateAccountCommand>,                //验证账户是否合法
+        ICommandHandler<ValidateAccountCommand>,                     //验证账户是否合法
         ICommandHandler<AddTransactionPreparationCommand>,           //添加预操作
         ICommandHandler<CommitTransactionPreparationCommand>         //提交预操作
     {
@@ -21,11 +22,11 @@ namespace BankTransferSample.CommandHandlers
             get { return true; }
         }
 
-        public void Handle(ICommandContext context, CreateAccountCommand command)
+        public Task HandleAsync(ICommandContext context, CreateAccountCommand command)
         {
-            context.Add(new BankAccount(command.AggregateRootId, command.Owner));
+            return context.AddAsync(new BankAccount(command.AggregateRootId, command.Owner));
         }
-        public Task<AsyncTaskResult<IApplicationMessage>> HandleAsync(ValidateAccountCommand command)
+        public Task HandleAsync(ICommandContext context, ValidateAccountCommand command)
         {
             var applicationMessage = default(ApplicationMessage);
 
@@ -39,15 +40,18 @@ namespace BankTransferSample.CommandHandlers
                 applicationMessage = new AccountValidatePassedMessage(command.AggregateRootId, command.TransactionId);
             }
 
-            return Task.FromResult(new AsyncTaskResult<IApplicationMessage>(AsyncTaskStatus.Success, applicationMessage));
+            context.SetApplicationMessage(applicationMessage);
+            return Task.CompletedTask;
         }
-        public void Handle(ICommandContext context, AddTransactionPreparationCommand command)
+        public async Task HandleAsync(ICommandContext context, AddTransactionPreparationCommand command)
         {
-            context.Get<BankAccount>(command.AggregateRootId).AddTransactionPreparation(command.TransactionId, command.TransactionType, command.PreparationType, command.Amount);
+            var account = await context.GetAsync<BankAccount>(command.AggregateRootId);
+            account.AddTransactionPreparation(command.TransactionId, command.TransactionType, command.PreparationType, command.Amount);
         }
-        public void Handle(ICommandContext context, CommitTransactionPreparationCommand command)
+        public async Task HandleAsync(ICommandContext context, CommitTransactionPreparationCommand command)
         {
-            context.Get<BankAccount>(command.AggregateRootId).CommitTransactionPreparation(command.TransactionId);
+            var account = await context.GetAsync<BankAccount>(command.AggregateRootId);
+            account.CommitTransactionPreparation(command.TransactionId);
         }
     }
 }

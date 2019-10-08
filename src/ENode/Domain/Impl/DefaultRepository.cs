@@ -1,23 +1,22 @@
 ﻿using System;
+using System.Threading.Tasks;
 
 namespace ENode.Domain.Impl
 {
     public class DefaultRepository : IRepository
     {
         private readonly IMemoryCache _memoryCache;
-        private readonly IAggregateStorage _aggregateRootStorage;
 
-        public DefaultRepository(IMemoryCache memoryCache, IAggregateStorage aggregateRootStorage)
+        public DefaultRepository(IMemoryCache memoryCache)
         {
             _memoryCache = memoryCache;
-            _aggregateRootStorage = aggregateRootStorage;
         }
 
-        public T Get<T>(object aggregateRootId) where T : class, IAggregateRoot
+        public async Task<T> GetAsync<T>(object aggregateRootId) where T : class, IAggregateRoot
         {
-            return Get(typeof(T), aggregateRootId) as T;
+            return await GetAsync(typeof(T), aggregateRootId).ConfigureAwait(false) as T;
         }
-        public IAggregateRoot Get(Type aggregateRootType, object aggregateRootId)
+        public async Task<IAggregateRoot> GetAsync(Type aggregateRootType, object aggregateRootId)
         {
             if (aggregateRootType == null)
             {
@@ -27,7 +26,12 @@ namespace ENode.Domain.Impl
             {
                 throw new ArgumentNullException("aggregateRootId");
             }
-            return _memoryCache.Get(aggregateRootId, aggregateRootType) ?? _aggregateRootStorage.Get(aggregateRootType, aggregateRootId.ToString());
+            var aggregateRoot = await _memoryCache.GetAsync(aggregateRootId, aggregateRootType).ConfigureAwait(false);
+            if (aggregateRoot == null)
+            {
+                aggregateRoot = await _memoryCache.RefreshAggregateFromEventStoreAsync(aggregateRootType, aggregateRootId).ConfigureAwait(false);
+            }
+            return aggregateRoot;
         }
     }
 }

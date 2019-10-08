@@ -1,5 +1,6 @@
 ﻿using ENode.EQueue;
 using ENode.Infrastructure;
+using ENode.Messaging;
 
 namespace BankTransferSample.Providers
 {
@@ -7,7 +8,7 @@ namespace BankTransferSample.Providers
     {
         public override string GetTopic(IApplicationMessage applicationMessage)
         {
-            return "BankTransferApplicationMessageTopic";
+            return Constants.ApplicationMessageTopic;
         }
     }
 }

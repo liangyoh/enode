@@ -2,12 +2,14 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
 using ECommon.Components;
 using ECommon.Logging;
 using ECommon.Serializing;
 using ENode.Commanding;
 using ENode.Domain;
 using ENode.Infrastructure;
+using ENode.Messaging;
 using EQueue.Clients.Consumers;
 using EQueue.Protocols;
 using IQueueMessageHandler = EQueue.Clients.Consumers.IMessageHandler;
@@ -17,7 +19,6 @@ namespace ENode.EQueue
     public class CommandConsumer : IQueueMessageHandler
     {
         private const string DefaultCommandConsumerGroup = "CommandConsumerGroup";
-        private Consumer _consumer;
         private SendReplyService _sendReplyService;
         private IJsonSerializer _jsonSerializer;
         private ITypeNameProvider _typeNameProvider;
@@ -26,11 +27,11 @@ namespace ENode.EQueue
         private IAggregateStorage _aggregateStorage;
         private ILogger _logger;
 
-        public Consumer Consumer { get { return _consumer; } }
+        public Consumer Consumer { get; private set; }
 
         public CommandConsumer InitializeENode()
         {
-            _sendReplyService = new SendReplyService();
+            _sendReplyService = new SendReplyService("CommandConsumerSendReplyService");
             _jsonSerializer = ObjectContainer.Resolve<IJsonSerializer>();
             _typeNameProvider = ObjectContainer.Resolve<ITypeNameProvider>();
             _commandProcessor = ObjectContainer.Resolve<ICommandProcessor>();
@@ -42,27 +43,27 @@ namespace ENode.EQueue
         public CommandConsumer InitializeEQueue(string groupName = null, ConsumerSetting setting = null)
         {
             InitializeENode();
-            _consumer = new Consumer(groupName ?? DefaultCommandConsumerGroup, setting ?? new ConsumerSetting
+            Consumer = new Consumer(groupName ?? DefaultCommandConsumerGroup, setting ?? new ConsumerSetting
             {
                 ConsumeFromWhere = ConsumeFromWhere.FirstOffset
-            });
+            }, "CommandConsumer");
             return this;
         }
 
         public CommandConsumer Start()
         {
             _sendReplyService.Start();
-            _consumer.SetMessageHandler(this).Start();
+            Consumer.SetMessageHandler(this).Start();
             return this;
         }
         public CommandConsumer Subscribe(string topic)
         {
-            _consumer.Subscribe(topic);
+            Consumer.Subscribe(topic);
             return this;
         }
         public CommandConsumer Shutdown()
         {
-            _consumer.Stop();
+            Consumer.Stop();
             _sendReplyService.Stop();
             return this;
         }
@@ -75,12 +76,13 @@ namespace ENode.EQueue
             var command = _jsonSerializer.Deserialize(commandMessage.CommandData, commandType) as ICommand;
             var commandExecuteContext = new CommandExecuteContext(_repository, _aggregateStorage, queueMessage, context, commandMessage, _sendReplyService);
             commandItems["CommandReplyAddress"] = commandMessage.ReplyAddress;
-            _logger.InfoFormat("ENode command message received, messageId: {0}, aggregateRootId: {1}", command.Id, command.AggregateRootId);
+            _logger.DebugFormat("ENode command message received, messageId: {0}, aggregateRootId: {1}", command.Id, command.AggregateRootId);
             _commandProcessor.Process(new ProcessingCommand(command, commandExecuteContext, commandItems));
         }
 
         class CommandExecuteContext : ICommandExecuteContext
         {
+            private IApplicationMessage _applicationMessage;
             private string _result;
             private readonly ConcurrentDictionary<string, IAggregateRoot> _trackingAggregateRootDict;
             private readonly IRepository _repository;
@@ -101,16 +103,16 @@ namespace ENode.EQueue
                 _messageContext = messageContext;
             }
 
-            public void OnCommandExecuted(CommandResult commandResult)
+            public Task OnCommandExecutedAsync(CommandResult commandResult)
             {
                 _messageContext.OnMessageHandled(_queueMessage);
 
                 if (string.IsNullOrEmpty(_commandMessage.ReplyAddress))
                 {
-                    return;
+                    return Task.CompletedTask;
                 }
 
-                _sendReplyService.SendReply((int)CommandReturnType.CommandExecuted, commandResult, _commandMessage.ReplyAddress);
+                return _sendReplyService.SendReply((int)CommandReturnType.CommandExecuted, commandResult, _commandMessage.ReplyAddress);
             }
             public void Add(IAggregateRoot aggregateRoot)
             {
@@ -123,7 +125,12 @@ namespace ENode.EQueue
                     throw new AggregateRootAlreadyExistException(aggregateRoot.UniqueId, aggregateRoot.GetType());
                 }
             }
-            public T Get<T>(object id, bool firstFromCache = true) where T : class, IAggregateRoot
+            public Task AddAsync(IAggregateRoot aggregateRoot)
+            {
+                Add(aggregateRoot);
+                return Task.CompletedTask;
+            }
+            public async Task<T> GetAsync<T>(object id, bool firstFromCache = true) where T : class, IAggregateRoot
             {
                 if (id == null)
                 {
@@ -138,11 +145,11 @@ namespace ENode.EQueue
 
                 if (firstFromCache)
                 {
-                    aggregateRoot = _repository.Get<T>(id);
+                    aggregateRoot = await _repository.GetAsync<T>(id).ConfigureAwait(false);
                 }
                 else
                 {
-                    aggregateRoot = _aggregateRootStorage.Get(typeof(T), aggregateRootId);
+                    aggregateRoot = await _aggregateRootStorage.GetAsync(typeof(T), aggregateRootId).ConfigureAwait(false);
                 }
 
                 if (aggregateRoot != null)
@@ -169,6 +176,16 @@ namespace ENode.EQueue
             public string GetResult()
             {
                 return _result;
+            }
+
+            public void SetApplicationMessage(IApplicationMessage applicationMessage)
+            {
+                _applicationMessage = applicationMessage;
+            }
+
+            public IApplicationMessage GetApplicationMessage()
+            {
+                return _applicationMessage;
             }
         }
     }

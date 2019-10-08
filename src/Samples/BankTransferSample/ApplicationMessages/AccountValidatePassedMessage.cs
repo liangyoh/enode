@@ -1,4 +1,4 @@
-﻿using ENode.Infrastructure;
+﻿using ENode.Messaging;
 
 namespace BankTransferSample.ApplicationMessages
 {
@@ -14,11 +14,6 @@ namespace BankTransferSample.ApplicationMessages
         {
             AccountId = accountId;
             TransactionId = transactionId;
-        }
-
-        public override string GetRoutingKey()
-        {
-            return AccountId;
         }
     }
 }

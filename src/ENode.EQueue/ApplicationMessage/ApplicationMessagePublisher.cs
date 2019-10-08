@@ -4,6 +4,7 @@ using ECommon.Components;
 using ECommon.IO;
 using ECommon.Serializing;
 using ENode.Infrastructure;
+using ENode.Messaging;
 using EQueue.Clients.Producers;
 using EQueueMessage = EQueue.Protocols.Message;
 
@@ -14,10 +15,9 @@ namespace ENode.EQueue
         private IJsonSerializer _jsonSerializer;
         private ITopicProvider<IApplicationMessage> _messageTopicProvider;
         private ITypeNameProvider _typeNameProvider;
-        private Producer _producer;
         private SendQueueMessageService _sendMessageService;
 
-        public Producer Producer { get { return _producer; } }
+        public Producer Producer { get; private set; }
 
         public ApplicationMessagePublisher InitializeENode()
         {
@@ -30,24 +30,24 @@ namespace ENode.EQueue
         public ApplicationMessagePublisher InitializeEQueue(ProducerSetting setting = null)
         {
             InitializeENode();
-            _producer = new Producer(setting);
+            Producer = new Producer(setting, "ApplicationMessagePublisher");
             return this;
         }
 
         public ApplicationMessagePublisher Start()
         {
-            _producer.Start();
+            Producer.Start();
             return this;
         }
         public ApplicationMessagePublisher Shutdown()
         {
-            _producer.Shutdown();
+            Producer.Shutdown();
             return this;
         }
         public Task<AsyncTaskResult> PublishAsync(IApplicationMessage message)
         {
             var queueMessage = CreateEQueueMessage(message);
-            return _sendMessageService.SendMessageAsync(_producer, queueMessage, message.GetRoutingKey() ?? message.Id, message.Id, null);
+            return _sendMessageService.SendMessageAsync(Producer, "applicationMessage", message.GetType().Name, queueMessage, message.Id, message.Id, message.Items);
         }
 
         private EQueueMessage CreateEQueueMessage(IApplicationMessage message)

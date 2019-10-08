@@ -1,8 +1,6 @@
-﻿using System;
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using ECommon.IO;
 using ECommon.Logging;
@@ -13,15 +11,13 @@ namespace ENode.Eventing.Impl
     {
         private const int Editing = 1;
         private const int UnEditing = 0;
+        private readonly object _lockObj = new object();
         private readonly ConcurrentDictionary<string, AggregateInfo> _aggregateInfoDict;
         private readonly ILogger _logger;
-
-        public bool SupportBatchAppendEvent { get; set; }
 
         public InMemoryEventStore(ILoggerFactory loggerFactory)
         {
             _aggregateInfoDict = new ConcurrentDictionary<string, AggregateInfo>();
-            SupportBatchAppendEvent = true;
             _logger = loggerFactory.Create(GetType().FullName);
         }
 
@@ -42,23 +38,22 @@ namespace ENode.Eventing.Impl
         }
         public Task<AsyncTaskResult<EventAppendResult>> BatchAppendAsync(IEnumerable<DomainEventStream> eventStreams)
         {
-            if (!SupportBatchAppendEvent)
+            var eventStreamDict = new Dictionary<string, IList<DomainEventStream>>();
+            var aggregateRootIdList = eventStreams.Select(x => x.AggregateRootId).Distinct().ToList();
+            foreach (var aggregateRootId in aggregateRootIdList)
             {
-                throw new NotSupportedException("Unsupport batch append event.");
-            }
-            foreach (var eventStream in eventStreams)
-            {
-                var task = AppendAsync(eventStream);
-                if (task.Result.Data != EventAppendResult.Success)
+                var eventStreamList = eventStreams.Where(x => x.AggregateRootId == aggregateRootId).ToList();
+                if (eventStreamList.Count > 0)
                 {
-                    return task;
+                    eventStreamDict.Add(aggregateRootId, eventStreamList);
                 }
             }
-            return Task.FromResult(new AsyncTaskResult<EventAppendResult>(AsyncTaskStatus.Success, EventAppendResult.Success));
-        }
-        public Task<AsyncTaskResult<EventAppendResult>> AppendAsync(DomainEventStream eventStream)
-        {
-            return Task.FromResult(new AsyncTaskResult<EventAppendResult>(AsyncTaskStatus.Success, null, Append(eventStream)));
+            var eventAppendResult = new EventAppendResult();
+            foreach (var entry in eventStreamDict)
+            {
+                BatchAppend(entry.Key, entry.Value, eventAppendResult);
+            }
+            return Task.FromResult(new AsyncTaskResult<EventAppendResult>(AsyncTaskStatus.Success, eventAppendResult));
         }
         public Task<AsyncTaskResult<DomainEventStream>> FindAsync(string aggregateRootId, int version)
         {
@@ -73,30 +68,49 @@ namespace ENode.Eventing.Impl
             return Task.FromResult(new AsyncTaskResult<IEnumerable<DomainEventStream>>(AsyncTaskStatus.Success, null, QueryAggregateEvents(aggregateRootId, aggregateRootTypeName, minVersion, maxVersion)));
         }
 
-        private EventAppendResult Append(DomainEventStream eventStream)
+        private void BatchAppend(string aggregateRootId, IList<DomainEventStream> eventStreamList, EventAppendResult eventAppendResult)
         {
-            var aggregateInfo = _aggregateInfoDict.GetOrAdd(eventStream.AggregateRootId, x => new AggregateInfo());
-            var originalStatus = Interlocked.CompareExchange(ref aggregateInfo.Status, Editing, UnEditing);
-
-            if (originalStatus == aggregateInfo.Status)
+            lock (_lockObj)
             {
-                return EventAppendResult.DuplicateEvent;
-            }
+                var aggregateInfo = _aggregateInfoDict.GetOrAdd(aggregateRootId, x => new AggregateInfo());
 
-            try
-            {
-                if (eventStream.Version == aggregateInfo.CurrentVersion + 1)
+                //检查提交过来的第一个事件的版本号是否是当前聚合根的当前版本号的下一个版本号
+                if (eventStreamList.First().Version != aggregateInfo.CurrentVersion + 1)
+                {
+                    eventAppendResult.AddDuplicateEventAggregateRootId(aggregateRootId);
+                    return;
+                }
+                //检查提交过来的事件本身是否满足版本号的递增关系
+                for (var i = 0; i < eventStreamList.Count - 1; i++)
+                {
+                    if (eventStreamList[i + 1].Version != eventStreamList[i].Version + 1)
+                    {
+                        eventAppendResult.AddDuplicateEventAggregateRootId(aggregateRootId);
+                        return;
+                    }
+                }
+
+                //检查重复处理的命令ID
+                foreach (DomainEventStream eventStream in eventStreamList)
+                {
+                    if (aggregateInfo.CommandDict.ContainsKey(eventStream.CommandId))
+                    {
+                        eventAppendResult.AddDuplicateCommandId(eventStream.CommandId);
+                    }
+                }
+                if (eventAppendResult.DuplicateCommandIdList.Count > 0)
+                {
+                    return;
+                }
+
+                foreach (DomainEventStream eventStream in eventStreamList)
                 {
                     aggregateInfo.EventDict[eventStream.Version] = eventStream;
                     aggregateInfo.CommandDict[eventStream.CommandId] = eventStream;
                     aggregateInfo.CurrentVersion = eventStream.Version;
-                    return EventAppendResult.Success;
                 }
-                return EventAppendResult.DuplicateEvent;
-            }
-            finally
-            {
-                Interlocked.Exchange(ref aggregateInfo.Status, UnEditing);
+
+                eventAppendResult.AddSuccessAggregateRootId(aggregateRootId);
             }
         }
         private DomainEventStream Find(string aggregateRootId, int version)
@@ -123,7 +137,6 @@ namespace ENode.Eventing.Impl
         }
         class AggregateInfo
         {
-            public int Status;
             public long CurrentVersion;
             public ConcurrentDictionary<int, DomainEventStream> EventDict = new ConcurrentDictionary<int, DomainEventStream>();
             public ConcurrentDictionary<string, DomainEventStream> CommandDict = new ConcurrentDictionary<string, DomainEventStream>();

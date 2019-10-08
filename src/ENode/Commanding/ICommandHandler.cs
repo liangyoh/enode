@@ -1,4 +1,4 @@
-﻿using ENode.Infrastructure;
+﻿using System.Threading.Tasks;
 
 namespace ENode.Commanding
 {
@@ -11,6 +11,6 @@ namespace ENode.Commanding
         /// </summary>
         /// <param name="context"></param>
         /// <param name="command"></param>
-        void Handle(ICommandContext context, TCommand command);
+        Task HandleAsync(ICommandContext context, TCommand command);
     }
 }

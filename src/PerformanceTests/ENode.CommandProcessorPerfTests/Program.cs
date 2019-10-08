@@ -14,6 +14,8 @@ using ENode.Commanding;
 using ENode.Configurations;
 using ENode.Domain;
 using ENode.Eventing;
+using ENode.Infrastructure;
+using ENode.Messaging;
 using NoteSample.Commands;
 using ECommonConfiguration = ECommon.Configurations.Configuration;
 
@@ -27,7 +29,7 @@ namespace ENode.CommandProcessorPerfTests
         static Stopwatch _watch;
         static IRepository _repository;
         static ICommandProcessor _commandProcessor;
-        static IEventService _eventService;
+        static IEventCommittingService _eventService;
         static int _commandCount;
         static int _executedCount;
         static int _totalCommandCount;
@@ -104,7 +106,7 @@ namespace ENode.CommandProcessorPerfTests
                 .RegisterBusinessComponents(assemblies)
                 .BuildContainer()
                 .InitializeBusinessAssemblies(assemblies);
-            _eventService = ObjectContainer.Resolve<IEventService>();
+            _eventService = ObjectContainer.Resolve<IEventCommittingService>();
 
             _logger = ObjectContainer.Resolve<ILoggerFactory>().Create("main");
             _repository = ObjectContainer.Resolve<IRepository>();
@@ -118,6 +120,7 @@ namespace ENode.CommandProcessorPerfTests
             private readonly ConcurrentDictionary<string, IAggregateRoot> _aggregateRoots;
             private readonly int _printSize;
             private string _result;
+            private IApplicationMessage _applicationMessage;
 
             public CommandExecuteContext(int commandCount)
             {
@@ -125,12 +128,12 @@ namespace ENode.CommandProcessorPerfTests
                 _printSize = commandCount / 10;
             }
 
-            public void OnCommandExecuted(CommandResult commandResult)
+            public Task OnCommandExecutedAsync(CommandResult commandResult)
             {
                 if (commandResult.Status != CommandStatus.Success)
                 {
                     _logger.Info("Command execute failed.");
-                    return;
+                    return Task.CompletedTask;
                 }
                 var currentCount = Interlocked.Increment(ref _executedCount);
                 if (_isUpdating && currentCount % _printSize == 0)
@@ -141,6 +144,7 @@ namespace ENode.CommandProcessorPerfTests
                 {
                     _waitHandle.Set();
                 }
+                return Task.CompletedTask;
             }
             public void Add(IAggregateRoot aggregateRoot)
             {
@@ -153,7 +157,12 @@ namespace ENode.CommandProcessorPerfTests
                     throw new AggregateRootAlreadyExistException(aggregateRoot.UniqueId, aggregateRoot.GetType());
                 }
             }
-            public T Get<T>(object id, bool firstFormCache = true) where T : class, IAggregateRoot
+            public Task AddAsync(IAggregateRoot aggregateRoot)
+            {
+                Add(aggregateRoot);
+                return Task.CompletedTask;
+            }
+            public async Task<T> GetAsync<T>(object id, bool firstFormCache = true) where T : class, IAggregateRoot
             {
                 if (id == null)
                 {
@@ -166,7 +175,7 @@ namespace ENode.CommandProcessorPerfTests
                     return aggregateRoot as T;
                 }
 
-                aggregateRoot = _repository.Get<T>(id);
+                aggregateRoot = await _repository.GetAsync<T>(id);
 
                 if (aggregateRoot != null)
                 {
@@ -192,6 +201,16 @@ namespace ENode.CommandProcessorPerfTests
             public string GetResult()
             {
                 return _result;
+            }
+
+            public void SetApplicationMessage(IApplicationMessage applicationMessage)
+            {
+                _applicationMessage = applicationMessage;
+            }
+
+            public IApplicationMessage GetApplicationMessage()
+            {
+                return _applicationMessage;
             }
         }
     }

@@ -1,11 +1,10 @@
 ﻿using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using ECommon.Extensions;
 using ECommon.Logging;
 using ENode.Configurations;
+using ENode.Infrastructure;
 
 namespace ENode.Commanding
 {
@@ -13,163 +12,135 @@ namespace ENode.Commanding
     {
         #region Private Variables 
 
-        private readonly ILogger _logger;
         private readonly object _lockObj = new object();
-        private readonly object _lockObj2 = new object();
-        private readonly string _aggregateRootId;
+        private readonly AsyncLock _asyncLock = new AsyncLock();
         private readonly ConcurrentDictionary<long, ProcessingCommand> _messageDict;
-        private readonly Dictionary<long, CommandResult> _requestToCompleteCommandDict;
         private readonly IProcessingCommandHandler _messageHandler;
-        private readonly ManualResetEvent _pauseWaitHandle;
-        private readonly ManualResetEvent _processingWaitHandle;
         private readonly int _batchSize;
-        private long _nextSequence;
-        private long _consumingSequence;
-        private long _consumedSequence;
-        private int _isRunning;
-        private bool _isPaused;
-        private bool _isProcessingCommand;
-        private DateTime _lastActiveTime;
+        private readonly ILogger _logger;
 
         #endregion
-
-        public string AggregateRootId
-        {
-            get
-            {
-                return _aggregateRootId;
-            }
-        }
-        public DateTime LastActiveTime
-        {
-            get { return _lastActiveTime; }
-        }
-        public bool IsRunning
-        {
-            get { return _isRunning == 1; }
-        }
 
         public ProcessingCommandMailbox(string aggregateRootId, IProcessingCommandHandler messageHandler, ILogger logger)
         {
             _messageDict = new ConcurrentDictionary<long, ProcessingCommand>();
-            _requestToCompleteCommandDict = new Dictionary<long, CommandResult>();
-            _pauseWaitHandle = new ManualResetEvent(false);
-            _processingWaitHandle = new ManualResetEvent(false);
-            _batchSize = ENodeConfiguration.Instance.Setting.CommandMailBoxPersistenceMaxBatchSize;
-            _aggregateRootId = aggregateRootId;
             _messageHandler = messageHandler;
             _logger = logger;
-            _consumedSequence = -1;
-            _lastActiveTime = DateTime.Now;
+            _batchSize = ENodeConfiguration.Instance.Setting.CommandMailBoxProcessBatchSize;
+            AggregateRootId = aggregateRootId;
+            LastActiveTime = DateTime.Now;
+        }
+
+        public string AggregateRootId { get; private set; }
+        public DateTime LastActiveTime { get; private set; }
+        public bool IsRunning { get; private set; }
+        public bool IsPauseRequested { get; private set; }
+        public bool IsPaused { get; private set; }
+        public long NextSequence { get; private set; }
+        public long ConsumingSequence { get; private set; }
+        public long TotalUnHandledMessageCount
+        {
+            get
+            {
+                return NextSequence - ConsumingSequence;
+            }
+        }
+        public long MaxMessageSequence
+        {
+            get
+            {
+                return NextSequence - 1;
+            }
         }
 
         public void EnqueueMessage(ProcessingCommand message)
         {
             lock (_lockObj)
             {
-                message.Sequence = _nextSequence;
-                message.Mailbox = this;
+                message.Sequence = NextSequence;
+                message.MailBox = this;
                 if (_messageDict.TryAdd(message.Sequence, message))
                 {
-                    _nextSequence++;
+                    NextSequence++;
+                    _logger.DebugFormat("{0} enqueued new message, aggregateRootId: {1}, messageId: {2}, messageSequence: {3}", GetType().Name, AggregateRootId, message.Message.Id, message.Sequence);
+                    LastActiveTime = DateTime.Now;
+                    TryRun();
                 }
             }
-            _lastActiveTime = DateTime.Now;
-            TryRun();
+        }
+        public void TryRun()
+        {
+            lock (_lockObj)
+            {
+                if (IsRunning || IsPauseRequested || IsPaused)
+                {
+                    return;
+                }
+                SetAsRunning();
+                _logger.DebugFormat("{0} start run, aggregateRootId: {1}, consumingSequence: {2}", GetType().Name, AggregateRootId, ConsumingSequence);
+                Task.Factory.StartNew(ProcessMessages);
+            }
+        }
+        public void CompleteRun()
+        {
+            LastActiveTime = DateTime.Now;
+            _logger.DebugFormat("{0} complete run, aggregateRootId: {1}", GetType().Name, AggregateRootId);
+            SetAsNotRunning();
+            if (TotalUnHandledMessageCount > 0)
+            {
+                TryRun();
+            }
         }
         public void Pause()
         {
-            _lastActiveTime = DateTime.Now;
-            _pauseWaitHandle.Reset();
-            while (_isProcessingCommand)
+            IsPauseRequested = true;
+            _logger.DebugFormat("{0} pause requested, aggregateRootId: {1}", GetType().Name, AggregateRootId);
+            var count = 0L;
+            while (IsRunning)
             {
-                _logger.InfoFormat("Request to pause the command mailbox, but the mailbox is currently processing command, so we should wait for a while, aggregateRootId: {0}", AggregateRootId);
-                _processingWaitHandle.WaitOne(1000);
+                Thread.Sleep(10);
+                count++;
+                if (count % 100 == 0)
+                {
+                    _logger.DebugFormat("{0} pause requested, but wait for too long to stop the current mailbox, aggregateRootId: {1}, waitCount: {2}", GetType().Name, AggregateRootId, count);
+                }
             }
-            _isPaused = true;
+            LastActiveTime = DateTime.Now;
+            IsPaused = true;
         }
         public void Resume()
         {
-            _lastActiveTime = DateTime.Now;
-            _isPaused = false;
-            _pauseWaitHandle.Set();
-            TryRun();
+            IsPauseRequested = false;
+            IsPaused = false;
+            LastActiveTime = DateTime.Now;
+            _logger.DebugFormat("{0} resume requested, aggregateRootId: {1}, consumingSequence: {2}", GetType().Name, AggregateRootId, ConsumingSequence);
         }
         public void ResetConsumingSequence(long consumingSequence)
         {
-            _lastActiveTime = DateTime.Now;
-            _consumingSequence = consumingSequence;
-            _requestToCompleteCommandDict.Clear();
+            ConsumingSequence = consumingSequence;
+            LastActiveTime = DateTime.Now;
+            _logger.DebugFormat("{0} reset consumingSequence, aggregateRootId: {1}, consumingSequence: {2}", GetType().Name, AggregateRootId, consumingSequence);
         }
-        public void CompleteMessage(ProcessingCommand processingCommand, CommandResult commandResult)
+        public void Clear()
         {
-            lock (_lockObj2)
-            {
-                _lastActiveTime = DateTime.Now;
-                try
-                {
-                    if (processingCommand.Sequence == _consumedSequence + 1)
-                    {
-                        _messageDict.Remove(processingCommand.Sequence);
-                        CompleteCommand(processingCommand, commandResult);
-                        _consumedSequence = ProcessNextCompletedCommands(processingCommand.Sequence);
-                    }
-                    else if (processingCommand.Sequence > _consumedSequence + 1)
-                    {
-                        _requestToCompleteCommandDict[processingCommand.Sequence] = commandResult;
-                    }
-                    else if (processingCommand.Sequence < _consumedSequence + 1)
-                    {
-                        _messageDict.Remove(processingCommand.Sequence);
-                        CompleteCommand(processingCommand, commandResult);
-                        _requestToCompleteCommandDict.Remove(processingCommand.Sequence);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error(string.Format("Command mailbox complete command failed, commandId: {0}, aggregateRootId: {1}", processingCommand.Message.Id, processingCommand.Message.AggregateRootId), ex);
-                }
-            }
+            _messageDict.Clear();
+            NextSequence = 0;
+            ConsumingSequence = 0;
+            LastActiveTime = DateTime.Now;
         }
-        public void Run()
+        public async Task CompleteMessage(ProcessingCommand message, CommandResult result)
         {
-            _lastActiveTime = DateTime.Now;
-            while (_isPaused)
-            {
-                _logger.InfoFormat("Command mailbox is pausing and we should wait for a while, aggregateRootId: {0}", AggregateRootId);
-                _pauseWaitHandle.WaitOne(1000);
-            }
-            ProcessingCommand processingCommand = null;
             try
             {
-                _processingWaitHandle.Reset();
-                _isProcessingCommand = true;
-                var count = 0;
-                while (_consumingSequence < _nextSequence && count < _batchSize)
+                if (_messageDict.TryRemove(message.Sequence, out ProcessingCommand removed))
                 {
-                    processingCommand = GetProcessingCommand(_consumingSequence);
-                    if (processingCommand != null)
-                    {
-                        _messageHandler.Handle(processingCommand);
-                    }
-                    _consumingSequence++;
-                    count++;
+                    LastActiveTime = DateTime.Now;
+                    await message.CompleteAsync(result).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
             {
-                _logger.Error(string.Format("Command mailbox run has unknown exception, aggregateRootId: {0}, commandId: {1}", AggregateRootId, processingCommand != null ? processingCommand.Message.Id : string.Empty), ex);
-                Thread.Sleep(1);
-            }
-            finally
-            {
-                _isProcessingCommand = false;
-                _processingWaitHandle.Set();
-                Exit();
-                if (_consumingSequence < _nextSequence)
-                {
-                    TryRun();
-                }
+                _logger.Error(string.Format("{0} complete message with result failed, aggregateRootId: {1}, messageId: {2}, messageSequence: {3}, result: {4}", GetType().Name, AggregateRootId, message.Message.Id, message.Sequence, result), ex);
             }
         }
         public bool IsInactive(int timeoutSeconds)
@@ -177,58 +148,51 @@ namespace ENode.Commanding
             return (DateTime.Now - LastActiveTime).TotalSeconds >= timeoutSeconds;
         }
 
-        private ProcessingCommand GetProcessingCommand(long sequence)
+        private async Task ProcessMessages()
         {
-            ProcessingCommand processingMessage;
-            if (_messageDict.TryGetValue(sequence, out processingMessage))
+            using (await _asyncLock.LockAsync().ConfigureAwait(false))
             {
-                return processingMessage;
+                LastActiveTime = DateTime.Now;
+                try
+                {
+                    var scannedCount = 0;
+                    while (TotalUnHandledMessageCount > 0 && scannedCount < _batchSize && !IsPauseRequested)
+                    {
+                        var message = GetMessage(ConsumingSequence);
+                        if (message != null)
+                        {
+                            await _messageHandler.HandleAsync(message).ConfigureAwait(false);
+                        }
+                        scannedCount++;
+                        ConsumingSequence++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(string.Format("{0} run has unknown exception, aggregateRootId: {1}", GetType().Name, AggregateRootId), ex);
+                    Thread.Sleep(1);
+                }
+                finally
+                {
+                    CompleteRun();
+                }
+            }
+        }
+        private ProcessingCommand GetMessage(long sequence)
+        {
+            if (_messageDict.TryGetValue(sequence, out ProcessingCommand message))
+            {
+                return message;
             }
             return null;
         }
-        private long ProcessNextCompletedCommands(long baseSequence)
+        private void SetAsRunning()
         {
-            var returnSequence = baseSequence;
-            var nextSequence = baseSequence + 1;
-            while (_requestToCompleteCommandDict.ContainsKey(nextSequence))
-            {
-                var processingCommand = default(ProcessingCommand);
-                if (_messageDict.TryRemove(nextSequence, out processingCommand))
-                {
-                    var commandResult = _requestToCompleteCommandDict[nextSequence];
-                    CompleteCommand(processingCommand, commandResult);
-                }
-                _requestToCompleteCommandDict.Remove(nextSequence);
-                returnSequence = nextSequence;
-                nextSequence++;
-            }
-            return returnSequence;
+            IsRunning = true;
         }
-        private void CompleteCommand(ProcessingCommand processingCommand, CommandResult commandResult)
+        private void SetAsNotRunning()
         {
-            try
-            {
-                processingCommand.Complete(commandResult);
-            }
-            catch (Exception ex)
-            {
-                _logger.Error(string.Format("Failed to complete command, commandId: {0}, aggregateRootId: {1}", processingCommand.Message.Id, processingCommand.Message.AggregateRootId), ex);
-            }
-        }
-        private void TryRun()
-        {
-            if (TryEnter())
-            {
-                Task.Factory.StartNew(Run);
-            }
-        }
-        private bool TryEnter()
-        {
-            return Interlocked.CompareExchange(ref _isRunning, 1, 0) == 0;
-        }
-        private void Exit()
-        {
-            Interlocked.Exchange(ref _isRunning, 0);
+            IsRunning = false;
         }
     }
 }

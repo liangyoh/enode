@@ -7,6 +7,7 @@ using ECommon.Dapper;
 using ECommon.IO;
 using ECommon.Logging;
 using ECommon.Utilities;
+using ENode.Eventing;
 using ENode.Infrastructure;
 
 namespace ENode.SqlServer
@@ -61,7 +62,7 @@ namespace ENode.SqlServer
                             Version = 1,
                             CreatedOn = currentTime,
                             UpdatedOn = currentTime
-                        }, GetTableName(aggregateRootId));
+                        }, GetTableName(aggregateRootId)).ConfigureAwait(false);
                         return AsyncTaskResult.Success;
                     }
                 }
@@ -97,7 +98,7 @@ namespace ENode.SqlServer
                             ProcessorName = processorName,
                             AggregateRootId = aggregateRootId,
                             Version = publishedVersion - 1
-                        }, GetTableName(aggregateRootId));
+                        }, GetTableName(aggregateRootId)).ConfigureAwait(false);
                         return AsyncTaskResult.Success;
                     }
                 }
@@ -123,7 +124,7 @@ namespace ENode.SqlServer
                     {
                         ProcessorName = processorName,
                         AggregateRootId = aggregateRootId
-                    }, GetTableName(aggregateRootId), "Version");
+                    }, GetTableName(aggregateRootId), "Version").ConfigureAwait(false);
                     return new AsyncTaskResult<int>(AsyncTaskStatus.Success, result.SingleOrDefault());
                 }
             }

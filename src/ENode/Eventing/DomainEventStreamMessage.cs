@@ -1,15 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using ENode.Infrastructure;
+using ENode.Messaging;
 
 namespace ENode.Eventing
 {
     [Serializable]
-    public class DomainEventStreamMessage : SequenceMessage<string>
+    public class DomainEventStreamMessage : Message
     {
+        public string AggregateRootId { get; set; }
+        public string AggregateRootTypeName { get; set; }
+        public int Version { get; set; }
         public string CommandId { get; set; }
-        public IDictionary<string, string> Items { get; set; }
         public IEnumerable<IDomainEvent> Events { get; set; }
 
         public DomainEventStreamMessage() { }
@@ -25,14 +27,15 @@ namespace ENode.Eventing
 
         public override string ToString()
         {
-            return string.Format("[MessageId={0},CommandId={1},AggregateRootId={2},AggregateRootTypeName={3},Version={4},Events={5},Items={6}]",
+            return string.Format("[Id={0},CommandId={1},AggregateRootId={2},AggregateRootTypeName={3},Version={4},Events={5},Items={6},Timestamp={7}]",
                 Id,
                 CommandId,
                 AggregateRootId,
                 AggregateRootTypeName,
                 Version,
                 string.Join("|", Events.Select(x => x.GetType().Name)),
-                string.Join("|", Items.Select(x => x.Key + ":" + x.Value)));
+                string.Join("|", Items.Select(x => x.Key + ":" + x.Value)),
+                Timestamp);
         }
     }
 }

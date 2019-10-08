@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using ECommon.Components;
 using ECommon.Configurations;
+using ECommon.Logging;
 using ECommon.Utilities;
 using ENode.Commanding;
 using ENode.Commanding.Impl;
@@ -13,7 +15,8 @@ using ENode.Eventing;
 using ENode.Eventing.Impl;
 using ENode.Infrastructure;
 using ENode.Infrastructure.Impl;
-using ENode.Infrastructure.Impl.InMemory;
+using ENode.Messaging;
+using ENode.Messaging.Impl;
 
 namespace ENode.Configurations
 {
@@ -50,6 +53,7 @@ namespace ENode.Configurations
         /// <summary>Create the enode configuration instance.
         /// </summary>
         /// <param name="configuration"></param>
+        /// <param name="setting"></param>
         /// <returns></returns>
         public static ENodeConfiguration CreateENode(Configuration configuration, ConfigurationSetting setting)
         {
@@ -82,35 +86,24 @@ namespace ENode.Configurations
             _configuration.SetDefault<IAggregateStorage, EventSourcingAggregateStorage>();
             _configuration.SetDefault<IRepository, DefaultRepository>();
 
-            _configuration.SetDefault<ICommandAsyncHandlerProvider, DefaultCommandAsyncHandlerProvider>();
             _configuration.SetDefault<ICommandHandlerProvider, DefaultCommandHandlerProvider>();
-            _configuration.SetDefault<ICommandRoutingKeyProvider, DefaultCommandRoutingKeyProvider>();
             _configuration.SetDefault<ICommandService, NotImplementedCommandService>();
 
             _configuration.SetDefault<IEventSerializer, DefaultEventSerializer>();
             _configuration.SetDefault<IEventStore, InMemoryEventStore>();
             _configuration.SetDefault<IPublishedVersionStore, InMemoryPublishedVersionStore>();
-            _configuration.SetDefault<IEventService, DefaultEventService>();
+            _configuration.SetDefault<IEventCommittingService, DefaultEventCommittingService>();
 
             _configuration.SetDefault<IMessageDispatcher, DefaultMessageDispatcher>();
 
             _configuration.SetDefault<IMessagePublisher<IApplicationMessage>, DoNothingPublisher>();
             _configuration.SetDefault<IMessagePublisher<DomainEventStreamMessage>, DoNothingPublisher>();
-            _configuration.SetDefault<IMessagePublisher<IPublishableException>, DoNothingPublisher>();
+            _configuration.SetDefault<IMessagePublisher<IDomainException>, DoNothingPublisher>();
 
             _configuration.SetDefault<IProcessingCommandHandler, DefaultProcessingCommandHandler>();
-            _configuration.SetDefault<IProcessingMessageHandler<ProcessingApplicationMessage, IApplicationMessage>, DefaultProcessingMessageHandler<ProcessingApplicationMessage, IApplicationMessage>>();
-            _configuration.SetDefault<IProcessingMessageHandler<ProcessingDomainEventStreamMessage, DomainEventStreamMessage>, DomainEventStreamMessageHandler>();
-            _configuration.SetDefault<IProcessingMessageHandler<ProcessingPublishableExceptionMessage, IPublishableException>, DefaultProcessingMessageHandler<ProcessingPublishableExceptionMessage, IPublishableException>>();
-
-            _configuration.SetDefault<IProcessingMessageScheduler<ProcessingApplicationMessage, IApplicationMessage>, DefaultProcessingMessageScheduler<ProcessingApplicationMessage, IApplicationMessage>>();
-            _configuration.SetDefault<IProcessingMessageScheduler<ProcessingDomainEventStreamMessage, DomainEventStreamMessage>, DefaultProcessingMessageScheduler<ProcessingDomainEventStreamMessage, DomainEventStreamMessage>>();
-            _configuration.SetDefault<IProcessingMessageScheduler<ProcessingPublishableExceptionMessage, IPublishableException>, DefaultProcessingMessageScheduler<ProcessingPublishableExceptionMessage, IPublishableException>>();
 
             _configuration.SetDefault<ICommandProcessor, DefaultCommandProcessor>();
-            _configuration.SetDefault<IMessageProcessor<ProcessingApplicationMessage, IApplicationMessage>, DefaultApplicationMessageProcessor>();
-            _configuration.SetDefault<IMessageProcessor<ProcessingDomainEventStreamMessage, DomainEventStreamMessage>, DefaultDomainEventProcessor>();
-            _configuration.SetDefault<IMessageProcessor<ProcessingPublishableExceptionMessage, IPublishableException>, DefaultPublishableExceptionProcessor>();
+            _configuration.SetDefault<IProcessingEventProcessor, DefaultProcessingEventProcessor>();
 
             _assemblyInitializerServiceTypes.Add(typeof(ITypeNameProvider));
             _assemblyInitializerServiceTypes.Add(typeof(IAggregateRootInternalHandlerProvider));
@@ -119,7 +112,6 @@ namespace ENode.Configurations
             _assemblyInitializerServiceTypes.Add(typeof(ITwoMessageHandlerProvider));
             _assemblyInitializerServiceTypes.Add(typeof(IThreeMessageHandlerProvider));
             _assemblyInitializerServiceTypes.Add(typeof(ICommandHandlerProvider));
-            _assemblyInitializerServiceTypes.Add(typeof(ICommandAsyncHandlerProvider));
 
             return this;
         }
@@ -170,12 +162,14 @@ namespace ENode.Configurations
         /// <returns></returns>
         public ENodeConfiguration Start()
         {
+            TaskScheduler.UnobservedTaskException += (sender, ex) =>
+            {
+                var logger = ObjectContainer.Resolve<ILoggerFactory>().Create(typeof(ENodeConfiguration).Name);
+                logger.ErrorFormat("UnobservedTaskException occurred.", ex);
+            };
             ObjectContainer.Resolve<IMemoryCache>().Start();
             ObjectContainer.Resolve<ICommandProcessor>().Start();
-            ObjectContainer.Resolve<IEventService>().Start();
-            ObjectContainer.Resolve<IMessageProcessor<ProcessingApplicationMessage, IApplicationMessage>>().Start();
-            ObjectContainer.Resolve<IMessageProcessor<ProcessingDomainEventStreamMessage, DomainEventStreamMessage>>().Start();
-            ObjectContainer.Resolve<IMessageProcessor<ProcessingPublishableExceptionMessage, IPublishableException>>().Start();
+            ObjectContainer.Resolve<IProcessingEventProcessor>().Start();
             return this;
         }
         /// <summary>Stop background tasks.
@@ -184,10 +178,7 @@ namespace ENode.Configurations
         {
             ObjectContainer.Resolve<IMemoryCache>().Stop();
             ObjectContainer.Resolve<ICommandProcessor>().Stop();
-            ObjectContainer.Resolve<IEventService>().Stop();
-            ObjectContainer.Resolve<IMessageProcessor<ProcessingApplicationMessage, IApplicationMessage>>().Stop();
-            ObjectContainer.Resolve<IMessageProcessor<ProcessingDomainEventStreamMessage, DomainEventStreamMessage>>().Stop();
-            ObjectContainer.Resolve<IMessageProcessor<ProcessingPublishableExceptionMessage, IPublishableException>>().Stop();
+            ObjectContainer.Resolve<IProcessingEventProcessor>().Stop();
         }
 
         #region Private Methods
@@ -209,7 +200,6 @@ namespace ENode.Configurations
         {
             return type.IsClass && !type.IsAbstract && type.GetInterfaces().Any(x => x.IsGenericType &&
             (x.GetGenericTypeDefinition() == typeof(ICommandHandler<>)
-            || x.GetGenericTypeDefinition() == typeof(ICommandAsyncHandler<>)
             || x.GetGenericTypeDefinition() == typeof(IMessageHandler<>)
             || x.GetGenericTypeDefinition() == typeof(IMessageHandler<,>)
             || x.GetGenericTypeDefinition() == typeof(IMessageHandler<,,>)

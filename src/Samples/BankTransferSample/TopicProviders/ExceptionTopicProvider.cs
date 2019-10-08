@@ -1,13 +1,13 @@
-﻿using ENode.EQueue;
-using ENode.Infrastructure;
+﻿using ENode.Domain;
+using ENode.EQueue;
 
 namespace BankTransferSample.Providers
 {
-    public class ExceptionTopicProvider : AbstractTopicProvider<IPublishableException>
+    public class ExceptionTopicProvider : AbstractTopicProvider<IDomainException>
     {
-        public override string GetTopic(IPublishableException source)
+        public override string GetTopic(IDomainException source)
         {
-            return "BankTransferExceptionTopic";
+            return Constants.ExceptionTopic;
         }
     }
 }
